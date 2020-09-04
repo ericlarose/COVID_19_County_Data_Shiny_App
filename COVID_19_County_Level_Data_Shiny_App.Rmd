@@ -1,0 +1,1513 @@
+---
+title: "COVID_19_County_Level_Data"
+author: "Eric LaRose"
+date: "9/4/2020"
+output: html_document
+---
+
+This file creates a dataframe of county-level demographic and socioeconomic characteristics as well as health outcomes. 
+Information on demographic and socioeconomic characteristics is taken from the 2014-2018 5-year American Community Survey (ACS), as downloaded from the NHGIS. Specifically, we obtain the following information:
+
+1. Total county population
+2. Percent of the population that is non-Hispanic white
+3. Percent of the population that is non-Hispanic black
+3. Percent of the population age 60 and above
+4. Percent of the population that is male
+5. Percent of the population in poverty
+6. Percent of the population aged 25+ with bachelor's degree or higher
+7. Median household income
+
+Some of this information is obtained directly from the data, and others need to be calculated.
+
+Information on county-level health outcomes is downloaded from the CDC's Community Health Status Indicators (CHSI), provided at:
+
+https://healthdata.gov/dataset/community-health-status-indicators-chsi-combat-obesity-heart-disease-and-cancer
+
+Information on coronavirus cases by county is from the New York Times, provided through the `covdata` package. See here for documentation: https://kjhealy.github.io/covdata/.
+
+Additionally, information on county-level land area (used to calculate population density) is taken from the U.S. Gazetteer files: https://www.census.gov/geographies/reference-files/time-series/geo/gazetteer-files.html.
+
+Finally, information on Trump's vote totals in the 2016 election is taken from
+https://electionlab.mit.edu/data.
+
+```{r setup, include=FALSE}
+# Load required packages
+knitr::opts_chunk$set(echo = TRUE)
+require(tidyverse)
+require(openxlsx)
+require(devtools)
+#install_github("kjhealy/covdata")
+require(covdata)
+require(Hmisc)
+require(plm)
+require(stargazer)
+require(tigris)
+require(magrittr)
+require(shiny)
+require(plotly)
+require(viridis)
+require(leaflet)
+require(htmlwidgets)
+require(htmltools)
+require(maptools)
+require(rmapshaper)
+require(spdplyr)
+require(rsconnect)
+
+# Deploy the Shiny app
+# deployApp(appDir = getwd())
+```
+
+# ACS Data
+
+Import 2014-2018 ACS data on various county-level characteristics, and clean data to get what we need.
+
+```{r}
+# Import NHGIS data.
+ACS_data <- read_csv('Raw_Data/nhgis0014_csv/nhgis0014_ds239_20185_2018_county.csv')
+head(ACS_data)
+
+# Keep only variables we need
+ACS_data <- ACS_data %>% select(STATE, STATEA, COUNTY,
+                                COUNTYA, COUNTY_POP =
+                                  AJWME001,
+                                POP_NON_HISP_WHITE = AJWVE003,
+                                POP_NON_HISP_BLACK = AJWVE004,
+                                POP_MALE = AJWBE002,
+                                AJWBE018, AJWBE019, AJWBE020,
+                                AJWBE021, AJWBE022, AJWBE023,
+                                AJWBE024, AJWBE025, AJWBE042,
+                                AJWBE043, AJWBE044, AJWBE045,
+                                AJWBE046, AJWBE047, AJWBE048,
+                                AJWBE049, 
+                                POP_25_PLUS = AJYPE001,
+                                POP_BACHELORS = AJYPE022,
+                                POP_MASTERS = AJYPE023,
+                                POP_PROFESSIONAL = AJYPE024,
+                                POP_DOCTORAL = AJYPE025,
+                                POP_POV_DETERMINED = AJY4E001,
+                                AJY4E002, AJY4E003, 
+                                MEDIAN_HH_INC = AJZAE001
+                                )
+
+# Calculate percent of population 25+ with a bachelor's degree
+ACS_data <- ACS_data %>% mutate(PCT_POP_BACHELORS_OR_HIGHER =
+                                  100*(POP_BACHELORS + 
+                                         POP_MASTERS + 
+                                         POP_PROFESSIONAL +
+                                         POP_DOCTORAL)/
+                                  POP_25_PLUS)
+
+# Calculate percent of population that is non-Hispanic white
+ACS_data <- ACS_data %>% mutate(PCT_POP_NON_HISP_WHITE = 
+                                  100*(POP_NON_HISP_WHITE/
+                                         COUNTY_POP),
+                                PCT_POP_NON_HISP_BLACK = 
+                                  100*(POP_NON_HISP_BLACK/
+                                         COUNTY_POP))
+
+# Calculate percent of population aged 60+
+ACS_data <- ACS_data %>% mutate(PCT_POP_AGED_60_PLUS = 
+                                 100*(AJWBE018 + AJWBE019 +
+                                        AJWBE020 + AJWBE021 +
+                                        AJWBE022 + AJWBE023 +
+                                        AJWBE024 + AJWBE025 +
+                                        AJWBE042 + AJWBE043 +
+                                        AJWBE044 + AJWBE045 +
+                                        AJWBE046 + AJWBE047 +
+                                        AJWBE048 + AJWBE049)/
+                                  COUNTY_POP)
+
+# Calculate percent of population that is male
+ACS_data <- ACS_data %>% mutate(PCT_POP_MALE = 100*(POP_MALE/
+                                  COUNTY_POP))
+
+# Calculate percent of population in poverty
+ACS_data <- ACS_data %>% mutate(PCT_POP_IN_POVERTY = 100*
+                                  (AJY4E002 + AJY4E003)/
+                                  POP_POV_DETERMINED)
+
+# Create variable for county FIPS code
+ACS_data <- ACS_data %>% mutate(STATE_FIPS =
+                                  as.integer(STATEA),
+                                COUNTYA = 
+                                  as.integer(COUNTYA),
+                                COUNTY_FIPS = STATE_FIPS * 
+                                  1000 + COUNTYA)
+
+# Keep only variables we need
+ACS_data <- ACS_data %>% select(COUNTY, STATE, COUNTY_FIPS,
+                                COUNTY_POP, 
+                                PCT_POP_BACHELORS_OR_HIGHER,
+                                PCT_POP_NON_HISP_WHITE,
+                                PCT_POP_NON_HISP_BLACK,
+                                PCT_POP_AGED_60_PLUS,
+                                PCT_POP_MALE,
+                                PCT_POP_IN_POVERTY,
+                                MEDIAN_HH_INC)
+
+# Drop Puerto Rico
+ACS_data <- ACS_data %>% filter(STATE != "Puerto Rico")
+```
+
+Additionally, import data on county-level land area, and calculate population density.
+
+```{r}
+# Import data on county-level land area.
+county_land_area <- read_tsv('Raw_Data/US_Gazetteer/Gaz_counties_national.txt')
+
+# Clean data to only have county 5-digit FIPS code and land area
+county_land_area <- county_land_area %>% mutate(COUNTY_FIPS = 
+                                                  as.integer(GEOID),
+                                                COUNTY_LAND_AREA = 
+                                                  ALAND_SQMI) %>%
+                                          select(COUNTY_FIPS, COUNTY_LAND_AREA)
+
+# Merge ACS data with this information, and calculate population density
+ACS_data <- ACS_data %>% left_join(county_land_area, by = 'COUNTY_FIPS') %>%
+              mutate(COUNTY_POP_DENSITY = COUNTY_POP/COUNTY_LAND_AREA) %>%
+              select(-COUNTY_LAND_AREA)
+```
+
+
+# County Health Data
+
+Import CDC data, which is actually provided as 11 separate CSV files. All the information we want to get is in the `RISKFACTORSANDACCESSTOCARE.csv`, except for the life expectancy variable, which comes from the `SUMMARYMEASURESOFHEALTH.csv`.
+
+```{r}
+# Read in data on risk factors and access to care.
+CDC_risk_factors_data <- read_csv('Raw_Data/chsi_dataset/RISKFACTORSANDACCESSTOCARE.csv')
+
+# Read in data on life expectancy, and keep only this variable.
+CDC_life_expectancy_data <- read_csv('Raw_Data/chsi_dataset/SUMMARYMEASURESOFHEALTH.csv')
+CDC_life_expectancy_data <- CDC_life_expectancy_data %>%
+  mutate(State_FIPS_Code = as.integer(State_FIPS_Code),
+         County_FIPS_Code = as.integer(County_FIPS_Code),
+         COUNTY_FIPS = 1000 * State_FIPS_Code + County_FIPS_Code) %>%
+  select(COUNTY_FIPS, COUNTY_LIFE_EXPECTANCY = ALE)
+# Replace missing values in the county life expectancy data
+CDC_life_expectancy_data <- CDC_life_expectancy_data %>% 
+  mutate(COUNTY_LIFE_EXPECTANCY = na_if(COUNTY_LIFE_EXPECTANCY, -2222.2))
+
+# Keep only variables we need, and calculate county FIPS codes
+CDC_risk_factors_data <- CDC_risk_factors_data %>% mutate(State_FIPS_Code = 
+                                                            as.integer(State_FIPS_Code),
+                                                          County_FIPS_Code = 
+                                                            as.integer(County_FIPS_Code),
+                                                          COUNTY_FIPS = 1000 * State_FIPS_Code +
+                                                            County_FIPS_Code) %>%
+                                                    select(COUNTY_FIPS, PCT_NO_EXERCISE = 
+                                                             No_Exercise, PCT_OBESE = Obesity,
+                                                           PCT_SMOKER = Smoker, 
+                                                           PCT_DIABETES = Diabetes, 
+                                                           NUMBER_UNINSURED = Uninsured)
+
+# Replace missing or incomplete data values with NA's. Missing or incomplete data is denoted
+# by the value -1111.1 for percentage variables, or -2222 for numeric variables
+missing_value_pct = -1111.1
+missing_value_num = -2222
+CDC_risk_factors_data <- CDC_risk_factors_data %>% mutate(PCT_NO_EXERCISE = na_if(PCT_NO_EXERCISE,
+                                                                            missing_value_pct),
+                                                          PCT_OBESE = na_if(PCT_OBESE, 
+                                                                            missing_value_pct),
+                                                          PCT_SMOKER = na_if(PCT_SMOKER, 
+                                                                            missing_value_pct),
+                                                          PCT_DIABETES = na_if(PCT_DIABETES,
+                                                                               missing_value_pct),
+                                                          NUMBER_UNINSURED = 
+                                                            na_if(NUMBER_UNINSURED,
+                                                                  missing_value_num))
+
+# Merge life expectancy data with the rest of the health data
+CDC_risk_factors_data <- left_join(CDC_risk_factors_data, 
+                                   CDC_life_expectancy_data,
+                                   by = 'COUNTY_FIPS')
+
+```
+
+# County-Level Data on Cases
+
+Note that there is an issue where governments in New York are reporting the totals for all of New York City, not broken down by borough (where each borough is a separate county). I cannot find up-to-date information broken down by borough. There is some data, not updated as frequently as the New York Times county level data, that is updated by the ZIP code level, available here: https://github.com/nychealth/coronavirus-data/blob/master/tests-by-zcta.csv. However, I still need to find a shapefile or other way to map ZIP codes to boroughs. For now, I am simply dropping observations corresponding to the five counties of New York City.
+
+```{r}
+# Import the NYT data on county-level cases, which has one observation per
+# county per day, for all county-day pairs with at least one case. Note that if
+# a county does not appear in the dataset, that means it has zero cases. We 
+# want to keep only the most recent day, as of September 4
+# This data is downloaded from https://github.com/nytimes/covid-19-data.
+county_cases_deaths <- read_csv('Raw_Data/covid-19-data-master/us-counties.csv')
+county_cases_deaths <- county_cases_deaths %>%
+  rename(CASES = cases, DEATHS = deaths) %>%
+  mutate(fips = as.integer(fips), CASES = replace_na(CASES, 0), 
+         DEATHS = replace_na(DEATHS, 0),
+         DEATH_RATE_PCT = 100*(DEATHS/CASES)) %>%
+  filter(!is.na(fips))
+  
+county_cases_deaths_most_recent_date <- county_cases_deaths %>% filter(date == max(date)) 
+
+# We now have one observation per county, but still need to account for the 
+# case of New York City. 
+```
+
+# Data on 2016 Election Results
+
+Here we look at Trump's share of the vote by county in the 2016 presidential election.
+
+```{r}
+# Import data from the MIT election lab on 2016 county-level outcomes by state.
+election_2016_results <- 
+  read_csv('Raw_Data/countypres_2000-2016.csv')
+
+# Keep only results from 2016, for observations corresponding to Trump's votes
+election_2016_results <- election_2016_results %>% filter(year == 2016 & 
+                                                            candidate == 
+                                                            "Donald Trump")
+
+# Calculate votes for Trump as percent of the total vote
+election_2016_results <- election_2016_results %>% 
+  mutate(COUNTY_TRUMP_PCT_VOTE = 100*(candidatevotes/totalvotes)) %>%
+  select(COUNTY_FIPS = FIPS, COUNTY_TRUMP_PCT_VOTE)
+```
+
+# Merge Data and Export
+
+```{r}
+# Merge the two data sources on demographic and health characteristics, and 
+# then calculate uninsured rates by county. Additionally, merge with 2016
+# election results.
+county_data <- ACS_data %>% inner_join(CDC_risk_factors_data, by = 
+                                         'COUNTY_FIPS') %>%
+                inner_join(election_2016_results, by = 'COUNTY_FIPS') %>%
+                mutate(PCT_POP_UNINSURED = 100 * 
+                         (NUMBER_UNINSURED/COUNTY_POP)) %>%
+                select(-NUMBER_UNINSURED) 
+
+# For now, drop counties in New York City
+county_data <- county_data %>% filter(COUNTY_FIPS %nin% c(36005, 36047,
+                                                           36061, 36081, 
+                                                           36085))
+
+# Write file to Excel
+write.xlsx(county_data, "county_demographic_and_health_data.xlsx")
+
+# Now, merge this data with the latest data from the New York Times. Replace
+# missing values with zeros for cases and deaths, and calculate the death
+# rate. Additionally, calculate cases and deaths per 100,000 residents.
+county_data_most_recent_date <- county_data %>% 
+  left_join(county_cases_deaths_most_recent_date, by = c('COUNTY_FIPS' = 'fips')) %>%
+  select(-date, -county, -state) %>%
+  mutate(CASES_PER_100000 = 100000 * CASES/COUNTY_POP,
+         DEATHS_PER_100000 = 100000 * DEATHS/COUNTY_POP)
+# Write file to Excel
+write.xlsx(county_data_most_recent_date, "county_demographic_health_data_death_rates.xlsx")
+
+```
+
+# Building a Dashboard
+
+This chunk of code calculates variables used in the mapping/visualizations in the dashboard.
+
+```{r message=FALSE}
+# Some basic cleaning
+county_cases_deaths_by_day <- county_cases_deaths %>% 
+  rename(COUNTY_FIPS = fips, DATE = date) %>%
+  select(-county, -state) 
+
+# Merge this data with information on county-level demographic, economic, 
+# and health variables, then create one observation per county-day pair in
+# the dataset.
+county_cases_deaths_by_day <- county_cases_deaths_by_day %>%
+  full_join(county_data %>% select(COUNTY_FIPS), by = 'COUNTY_FIPS') %>% 
+  complete(COUNTY_FIPS, DATE) %>% 
+  left_join(county_data, by = 'COUNTY_FIPS') %>%
+  mutate(CASES = replace_na(CASES, 0), 
+    DEATHS = replace_na(DEATHS, 0))
+
+# Create a dataset with relevant information that we might want to map/plot
+county_cases_deaths_by_day <- county_cases_deaths_by_day %>%
+  arrange(COUNTY_FIPS, DATE) %>% 
+  group_by(COUNTY_FIPS) %>%
+  mutate(COUNTY_HAS_CASES_DUMMY = (CASES>0), # Dummy variable is county has
+         # cases in given day
+         CASES_PER_100000 = 100000 * CASES/COUNTY_POP, # Cases per 100,000
+         DEATHS_PER_100000 = 100000 * DEATHS/COUNTY_POP, #Deaths per 100,000
+         CASE_FATALITY_RATE = 100*(DEATHS/CASES), 
+         # Percent of confirmed cases that result in death
+         NUMBER_NEW_CASES_IN_DAY = (CASES - dplyr::lag(CASES, 1)), 
+         # Change in number of cases from preceding day
+         NUMBER_NEW_DEATHS_IN_DAY = (DEATHS - dplyr::lag(DEATHS, 1)),
+         # Change in number of deaths from preceding day,
+         CASES_NUMBER_CHANGE_FROM_7_DAYS_AGO = (NUMBER_NEW_CASES_IN_DAY + 
+                                                  dplyr::lag(NUMBER_NEW_CASES_IN_DAY, 1) +
+                                                  dplyr::lag(NUMBER_NEW_CASES_IN_DAY, 2) +    
+                                                  dplyr::lag(NUMBER_NEW_CASES_IN_DAY, 3) +
+                                                  dplyr::lag(NUMBER_NEW_CASES_IN_DAY, 4) +
+                                                  dplyr::lag(NUMBER_NEW_CASES_IN_DAY, 5) +
+                                                  dplyr::lag(NUMBER_NEW_CASES_IN_DAY, 6)),
+         # Change in number of cases from 7 days ago, meant to account for 
+         # day-of-week patterns (reported cases and deaths are usually lower
+         # on Sundays and Mondays)
+         DEATHS_NUMBER_CHANGE_FROM_7_DAYS_AGO = (NUMBER_NEW_DEATHS_IN_DAY + 
+                                                  dplyr::lag(NUMBER_NEW_DEATHS_IN_DAY, 1) +
+                                                  dplyr::lag(NUMBER_NEW_DEATHS_IN_DAY, 2) +    
+                                                  dplyr::lag(NUMBER_NEW_DEATHS_IN_DAY, 3) +
+                                                  dplyr::lag(NUMBER_NEW_DEATHS_IN_DAY, 4) +
+                                                  dplyr::lag(NUMBER_NEW_DEATHS_IN_DAY, 5) +
+                                                  dplyr::lag(NUMBER_NEW_DEATHS_IN_DAY, 6)),
+         # Change in number of deaths from 7 days ago
+         CASES_DAY_OVER_DAY_PCT_CHANGE = 100*((CASES - dplyr::lag(CASES, 1))/
+                                                (dplyr::lag(CASES, 1))), 
+         # Percentage change in number of cases from preceding day
+         DEATHS_DAY_OVER_DAY_PCT_CHANGE = 100*((DEATHS - dplyr::lag(DEATHS, 1))/
+                                                 (dplyr::lag(DEATHS, 1))),
+         # Percentage change in number of deaths from preceding day,
+         CASES_PCT_CHANGE_FROM_7_DAYS_AGO = 100*((CASES - dplyr::lag(CASES, 7))/
+                                                (dplyr::lag(CASES, 7))),
+         # Percentage change in number of cases from 7 days ago
+         DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO = 100*((DEATHS - dplyr::lag(DEATHS, 7))/
+                                                 (dplyr::lag(DEATHS, 7))),
+         # Percentage change in number of deaths from 7 days ago
+         CASES_DOUBLING_TIME_ONE_DAY_CHANGE = 
+           log(2)/log(1 + CASES_DAY_OVER_DAY_PCT_CHANGE/100),
+         # Doubling time of cases in days, based on current one-day percentage change
+         DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE = 
+           (log(2)/log(1 + DEATHS_DAY_OVER_DAY_PCT_CHANGE/100)),
+         # Doubling time of cases in days, based on current seven-day percentage change
+         CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE = 
+           7*log(2)/log(1 + CASES_PCT_CHANGE_FROM_7_DAYS_AGO/100),
+         # Doubling time of deaths in days, based on current one-day percentage change
+         DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE = 
+           7*(log(2)/log(1 + DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO/100))
+         # Doubling time of deaths in days, based on current seven-day percentage change
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(COUNTY) & !is.na(STATE) & !is.na(DATE))
+```
+
+This chunk of code prepares county-level shapefiles from the maps:
+
+```{r}
+# Using the tigris package, download shapefile for Core-Based Statistical Areas (metropolitan and micropolitan areas) and for states
+county_shapefile <- tigris::counties(cb = FALSE, resolution = "500k", year = 2018)
+county_shapefile@data$COUNTY_FIPS <- as.integer(county_shapefile@data$GEOID)
+
+# We merge this shapefile with our data as a reactive element in the code to produce the Leaflet
+
+# Define color palette we will use in the interactive map
+#pal <- colorQuantile("YlOrRd", NULL, n = 9)
+#pal <- colorBin("YlOrRd", NULL, bins = 10, pretty = TRUE)
+pal <- colorNumeric("YlOrRd", domain = NULL)
+pal_doubling <- colorNumeric("YlOrRd", domain = NULL, reverse = TRUE)
+pal_case_fatality_rate <- colorBin("YlOrRd", domain = NULL, bins = c(0, 0.00001, 0.5, 1, 2, 3, 5, 10,20, 100))
+
+# Simplify this shapefile - makes the Shiny app much faster to load
+county_shapefile <- rmapshaper::ms_simplify(county_shapefile)
+```
+
+This chunk of code replaces certain variables with NA values, which makes it easier to see counties with zero cases, etc., on the map.
+
+```{r}
+# Replace negative numbers, infinite, values, etc. with NA in all data
+county_cases_deaths_by_day <- county_cases_deaths_by_day %>%
+  mutate(CASES_DAY_OVER_DAY_PCT_CHANGE = 
+           replace(CASES_DAY_OVER_DAY_PCT_CHANGE, 
+                   which(CASES_DAY_OVER_DAY_PCT_CHANGE<0 | 
+                           is.infinite(CASES_DAY_OVER_DAY_PCT_CHANGE)), NA),
+         DEATHS_DAY_OVER_DAY_PCT_CHANGE = 
+           replace(DEATHS_DAY_OVER_DAY_PCT_CHANGE, 
+                   which(DEATHS_DAY_OVER_DAY_PCT_CHANGE<0 | 
+                           is.infinite(DEATHS_DAY_OVER_DAY_PCT_CHANGE)), NA),
+         CASES_PCT_CHANGE_FROM_7_DAYS_AGO = 
+           replace(CASES_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                   which(CASES_PCT_CHANGE_FROM_7_DAYS_AGO<0 | 
+                           is.infinite(CASES_PCT_CHANGE_FROM_7_DAYS_AGO)), NA),
+         DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO = 
+           replace(CASES_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                   which(CASES_PCT_CHANGE_FROM_7_DAYS_AGO<0 | 
+                           is.infinite(CASES_PCT_CHANGE_FROM_7_DAYS_AGO)), NA),
+        CASES_DOUBLING_TIME_ONE_DAY_CHANGE = 
+           replace(CASES_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                   which(CASES_DOUBLING_TIME_ONE_DAY_CHANGE<=0 | 
+                           is.infinite(CASES_DOUBLING_TIME_ONE_DAY_CHANGE)), NA),
+        DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE = 
+           replace(DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                   which(DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE<=0 | 
+                           is.infinite(DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE)), NA),
+        CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE = 
+           replace(CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                   which(CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE<=0 | 
+                           is.infinite(CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE)), NA),
+        DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE = 
+           replace(DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                   which(DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE<=0 | 
+                           is.infinite(DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE)), NA))
+# Replace 0's in certain variables with NA values for mapping.
+county_cases_deaths_by_day_for_mapping <- county_cases_deaths_by_day %>% 
+  mutate(CASES = na_if(CASES, 0),
+         DEATHS = na_if(DEATHS, 0),
+         CASES_PER_100000 = na_if(CASES_PER_100000, 0),
+         DEATHS_PER_100000 = na_if(DEATHS_PER_100000, 0),
+         NUMBER_NEW_CASES_IN_DAY = na_if(NUMBER_NEW_CASES_IN_DAY, 0),
+         NUMBER_NEW_DEATHS_IN_DAY = na_if(NUMBER_NEW_DEATHS_IN_DAY, 0),
+         CASES_NUMBER_CHANGE_FROM_7_DAYS_AGO = na_if(CASES_NUMBER_CHANGE_FROM_7_DAYS_AGO, 0),
+         DEATHS_NUMBER_CHANGE_FROM_7_DAYS_AGO = na_if(DEATHS_NUMBER_CHANGE_FROM_7_DAYS_AGO, 0),
+         CASES_DAY_OVER_DAY_PCT_CHANGE = na_if(CASES_DAY_OVER_DAY_PCT_CHANGE, 0),
+         DEATHS_DAY_OVER_DAY_PCT_CHANGE = na_if(DEATHS_DAY_OVER_DAY_PCT_CHANGE, 0),
+         CASES_PCT_CHANGE_FROM_7_DAYS_AGO = na_if(CASES_PCT_CHANGE_FROM_7_DAYS_AGO, 0),
+         DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO = na_if(DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO, 0),
+         COUNTY = str_remove(COUNTY, " County"))
+```
+
+
+This chunk of code creates the Shiny app.
+
+```{r}
+# Create the UI
+ui <- fluidPage(
+  
+  # Set Page Title
+  titlePanel("Explore Coronavirus Cases in Your County"),
+  
+  # Define text for main panel
+  mainPanel(
+    h2("By Eric LaRose"),
+    h2("Last Updated", max(county_cases_deaths_by_day$DATE)),
+    h3("Select a County to View Trends in its Cases and Deaths Over Time"),
+    sidebarPanel(
+      uiOutput('Chosen_State_Output'),
+      uiOutput('Chosen_County_Output')
+    ),
+    h3("Cases and Deaths Over Time"),
+    h4("Select a Scale (Linear or Log), and Aggregate or Population-Adjusted Numbers"),
+    p("A straight line on a log plot shows exponential growth."),
+    selectInput(inputId = 'cases_deaths_scale',
+      label = "Shows Cases and Deaths on Linear or Log Scale?",
+      choices = c("Linear", "Log")
+    ),
+    selectInput(inputId = 'cases_deaths_aggregate_or_per_capita',
+      label = "Shows Cases and Deaths in Total or Population-Adjusted (Per 100,000 Residents)?",
+      choices = c("Total", "Population-Adjusted")
+    ),
+    plotlyOutput("cases_and_deaths_in_chosen_county"),
+    h3("Growth Rates in Cases and Deaths Over Time"),
+    p("These plots show daily growth rates in absolute numbers and percentage terms by county."),
+    h4("Select Whether to View Absolute or Percentage Changes in Cases and Deaths"),
+    p("A straight line on a log plot shows exponential growth."),
+    selectInput(inputId = 'absolute_pct_daily_cases_deaths',
+      label = "Shows New Cases and Deaths in Absolute or Percentage Terms?",
+      choices = c("Absolute", "Percentage")
+    ),
+    plotlyOutput("daily_new_cases_and_deaths"),
+    h3("Select Two Counties to Compare"),
+    uiOutput('Chosen_State_Output_1'),
+    uiOutput('Chosen_County_Output_1'),
+    uiOutput('Chosen_State_Output_2'),
+    uiOutput('Chosen_County_Output_2'),
+    uiOutput('Chosen_Comparison_Variable_Output'),
+    plotOutput("comparison_plot"),
+    p(""),
+    p(""),
+    p(""),
+    p(""),
+    p(""),
+    p(""),
+    p(""),
+    p(""),
+    p(""),
+    h3("Maps Over Time of County-Level Trends"),
+    sliderInput(inputId = 'selected_date_for_maps',
+                label = "Drag the Slider to Select a Date to View in the Map Below",
+                min = min(county_cases_deaths_by_day$DATE),
+                max = max(county_cases_deaths_by_day$DATE),
+                value = max(county_cases_deaths_by_day$DATE),
+                step = 1),
+    selectInput(inputId = 'selected_variable_for_maps',
+      label = "Select a Variable to Map",
+      choices = c("Total Cases", "Total Deaths",
+                  "Cases per 100,000", "Deaths per 100,000",
+                  "Case Fatality Rate",
+                  "Daily New Cases", "Daily New Deaths",
+                  "New Cases in Preceding 7 Days", "New Deaths in Preceding 7 Days",
+                  "Percent Change in Cases from Preceding Day",
+                  "Percent Change in Deaths from Preceding Day",
+                  "Percent Change in Cases from 7 Days Ago",
+                  "Percent Change in Deaths from 7 Days Ago",
+                  "Doubling Rate of Cases, Based on Change from Preceding Day",
+                  "Doubling Rate of Deaths, Based on Change from Preceding Day",
+                  "Doubling Rate of Cases, Based on Change from 7 Days Ago",
+                  "Doubling Rate of Deaths, Based on Change from 7 Days Ago")
+    ),
+    leafletOutput("interactive_map")
+        # Want to map the following: total cases, total deaths, cases and deaths per 100,000, 
+    # daily percent growth in cases and deaths, weekly percent growth in cases and deaths,
+    # daily doubling rate, and weekly doubling rate, and a dummy variable for whether county
+    # has cases on given day.
+  )
+)
+
+### This defines the server actions, which create all of the visualizations used in the Shiny app
+server <- function(input, output){
+  
+    # This allows for the dropdown to select a state.
+    output$Chosen_State_Output <- renderUI({
+       selectizeInput(inputId = 'Chosen_State_Input', 'Select a State', 
+                      choices = unique(county_cases_deaths_by_day$STATE))
+    })
+    # This allows for the dropdown to select a county, where the UI only displays counties
+    # in the chosen state
+    output$Chosen_County_Output <- renderUI({
+          chosen_state <- input$Chosen_State_Input
+          choice_var2 <- reactive({
+            unique(county_cases_deaths_by_day %>%
+                    filter(STATE %in% c(input$Chosen_State_Input)) %>%
+                    select(COUNTY))
+          })
+    selectizeInput(inputId = 'Chosen_County_Input', 'Select a County in that State',
+                   choices = choice_var2())
+    })
+    
+    # This filters the data to only include the chosen county
+    chosen_county_data <- reactive({
+      county_cases_deaths_by_day %>% filter(COUNTY %in% c(input$Chosen_County_Input) &
+                                            STATE %in% c(input$Chosen_State_Input))
+    })
+
+    # This creates the plot showing total cases and deaths. We need to consider four possible
+    # cases for this plot: aggregate vs. population-adjusted, and linear vs. log scale.
+    output$cases_and_deaths_in_chosen_county <- renderPlotly({
+
+      # First case: Linear scale, aggregate numbers
+      if (input$cases_deaths_scale == 'Linear' &
+          input$cases_deaths_aggregate_or_per_capita == 'Total'){
+        
+        plot_ly(data = chosen_county_data(), x = ~DATE, y = ~CASES, type = 'scatter', 
+                name = 'Cases', mode = 'lines+markers', colors = c("#FF0000", "#0000FF"), 
+                text = ~paste("Date: ", DATE, "<br>Confirmed Cases: ", CASES)) %>% 
+          layout( 
+                title = (paste0("Cases and Deaths in \n", input$Chosen_County_Input,
+                                ", ", input$Chosen_State_Input)),
+                xaxis = list(title = "Date"),
+                yaxis = list(title = "Total Confirmed Cases and Deaths") 
+          ) %>%
+          add_trace(y = ~DEATHS, name = 'Deaths', mode = 'lines+markers', 
+                    colors = c("#FF0000", "#0000FF"), 
+                    text = ~paste("Date: ", DATE, '<br>Confirmed Deaths',  DEATHS))
+      }
+
+      # Second case: Linear scale, population-adjusted numbers
+      else if (input$cases_deaths_scale == 'Linear' &
+          input$cases_deaths_aggregate_or_per_capita == 'Population-Adjusted'){
+        
+        plot_ly(data = chosen_county_data(), x = ~DATE, y = ~CASES_PER_100000, type = 'scatter', 
+                name = 'Cases', mode = 'lines+markers', colors = c("#FF0000", "#0000FF"), 
+                text = ~paste("Date: ", DATE, "<br>Confirmed Cases Per 100,000: ",
+                              round(CASES_PER_100000, 2))) %>% 
+          layout( 
+                title = (paste0("Cases and Deaths in \n", input$Chosen_County_Input,
+                                ", ", input$Chosen_State_Input)),
+                xaxis = list(title = "Date"),
+                yaxis = list(title = "Confirmed Cases and Deaths Per 100,000 Residents") 
+          ) %>%
+          add_trace(y = ~DEATHS_PER_100000, name = 'Deaths', mode = 'lines+markers', 
+                    colors = c("#FF0000", "#0000FF"), 
+                    text = ~paste("Date: ", DATE, '<br>Confirmed Deaths Per 100,000: ',  
+                                  round(DEATHS_PER_100000, 2)))
+      }
+
+      # Third case: Log scale, aggregate numbers
+      else if (input$cases_deaths_scale == 'Log' &
+          input$cases_deaths_aggregate_or_per_capita == 'Total'){
+        
+        plot_ly(data = chosen_county_data(), x = ~DATE, y = ~CASES, type = 'scatter', 
+                name = 'Cases', mode = 'lines+markers', colors = c("#FF0000", "#0000FF"), 
+                text = ~paste("Date: ", DATE, "<br>Confirmed Cases: ", CASES)) %>% 
+          layout( 
+                title = (paste0("Cases and Deaths in \n", input$Chosen_County_Input,
+                                ", ", input$Chosen_State_Input)),
+                xaxis = list(title = "Date"),
+                yaxis = list(title = "Total Confirmed Cases and Deaths", 
+                             type = "log") 
+          ) %>%
+          add_trace(y = ~DEATHS, name = 'Deaths', mode = 'lines+markers', 
+                    colors = c("#FF0000", "#0000FF"), 
+                    text = ~paste("Date: ", DATE, '<br>Confirmed Deaths',  DEATHS))
+      }
+
+      # Fourth case: Log scale, population-adjusted numbers
+      else if (input$cases_deaths_scale == 'Log' &
+          input$cases_deaths_aggregate_or_per_capita == 'Population-Adjusted'){
+        
+        plot_ly(data = chosen_county_data(), x = ~DATE, y = ~CASES_PER_100000, type = 'scatter', 
+                name = 'Cases', mode = 'lines+markers', colors = c("#FF0000", "#0000FF"), 
+                text = ~paste("Date: ", DATE, "<br>Confirmed Cases Per 100,000: ",
+                              round(CASES_PER_100000, 2))) %>% 
+          layout( 
+                title = (paste0("Cases and Deaths in \n", input$Chosen_County_Input,
+                                ", ", input$Chosen_State_Input)),
+                xaxis = list(title = "Date"),
+                yaxis = list(title = "Confirmed Cases and Deaths Per 100,000 Residents",
+                             type = "log") 
+          ) %>%
+          add_trace(y = ~DEATHS_PER_100000, name = 'Deaths', mode = 'lines+markers', 
+                    colors = c("#FF0000", "#0000FF"), 
+                    text = ~paste("Date: ", DATE, '<br>Confirmed Deaths Per 100,000: ',  
+                                  round(DEATHS_PER_100000, 2)))
+      }
+    })
+    
+    # This creates the plot showing daily new cases and deaths, either in absolute terms or 
+    # as a percentage of existing cases and deaths. We use only a linear scale for this plot.
+    output$daily_new_cases_and_deaths <- renderPlotly({
+
+      # First case: Absolute numbers
+      if (input$absolute_pct_daily_cases_deaths == 'Absolute'){
+        
+        plot_ly(data = chosen_county_data(), x = ~DATE, y = ~NUMBER_NEW_CASES_IN_DAY, 
+                type = 'scatter', 
+                name = 'New Cases', mode = 'lines+markers', colors = c("#FF0000", "#0000FF"), 
+                text = ~paste("Date: ", DATE, "<br>Confirmed New Cases: ", 
+                              NUMBER_NEW_CASES_IN_DAY)) %>% 
+          layout( 
+                title = (paste0("Daily New Cases and Deaths in \n", input$Chosen_County_Input,
+                                ", ", input$Chosen_State_Input)),
+                xaxis = list(title = "Date"),
+                yaxis = list(title = "Total Daily New Cases and Deaths") 
+          ) %>%
+          add_trace(y = ~NUMBER_NEW_DEATHS_IN_DAY, name = 'New Deaths', mode = 'lines+markers', 
+                    colors = c("#FF0000", "#0000FF"), 
+                    text = ~paste("Date: ", DATE, '<br>Confirmed New Deaths',  
+                                  NUMBER_NEW_DEATHS_IN_DAY))
+      }
+
+      # Second case: Percentage numbers
+      else if (input$absolute_pct_daily_cases_deaths == 'Percentage'){
+        
+        plot_ly(data = chosen_county_data(), x = ~DATE, y = ~CASES_DAY_OVER_DAY_PCT_CHANGE, 
+                type = 'scatter', 
+                name = 'New Cases', mode = 'lines+markers', colors = c("#FF0000", "#0000FF"), 
+                text = ~paste("Date: ", DATE, "<br>Percent Growth in New Cases: ", 
+                              CASES_DAY_OVER_DAY_PCT_CHANGE)) %>% 
+          layout( 
+                title = (paste0("Daily Percentage Growth in Cases and Deaths in \n",
+                                input$Chosen_County_Input,
+                                ", ", input$Chosen_State_Input)),
+                xaxis = list(title = "Date"),
+                yaxis = list(title = "Daily Percentage Growth in Cases and Deaths") 
+          ) %>%
+          add_trace(y = ~DEATHS_DAY_OVER_DAY_PCT_CHANGE, name = 'New Deaths', 
+                    mode = 'lines+markers', 
+                    colors = c("#FF0000", "#0000FF"), 
+                    text = ~paste("Date: ", DATE, '<br>Percent Growth in New Deaths',  
+                                  DEATHS_DAY_OVER_DAY_PCT_CHANGE))
+      }
+    })
+    # Following plot: change in both numbers and percentage terms from a week ago
+    
+    # This filters the county-level data for mapping, to include only observations corresponding
+    # to the chosen date. For now, also keep only observations with at least 0 cases.
+    chosen_mapping_data <- reactive({
+      data_for_merging <- county_cases_deaths_by_day_for_mapping %>% 
+        filter(DATE == input$selected_date_for_maps)
+      return(merge(county_shapefile, data_for_merging, by = c('COUNTY_FIPS')))
+    })
+    
+    # This allows for the dropdown to select one of two states to compare.
+    output$Chosen_State_Output_1 <- renderUI({
+       selectizeInput(inputId = 'Chosen_State_Input_1', 'Select a State', 
+                      choices = unique(county_cases_deaths_by_day$STATE))
+    })
+    # This allows for the dropdown to select one of two counties to compare, where the UI only 
+    # displays counties in the chosen state.
+    output$Chosen_County_Output_1 <- renderUI({
+          chosen_state_1 <- input$Chosen_State_Input_1
+          choice_var3 <- reactive({
+            unique(county_cases_deaths_by_day %>%
+                    filter(STATE %in% c(input$Chosen_State_Input_1)) %>%
+                    select(COUNTY))
+          })
+    selectizeInput(inputId = 'Chosen_County_Input_1', 'Select a County in that State',
+                   choices = choice_var3())
+    })
+    
+    # This allows for the dropdown to select the second of two states to compare.
+    output$Chosen_State_Output_2 <- renderUI({
+       selectizeInput(inputId = 'Chosen_State_Input_2', 'Select a Second State', 
+                      choices = unique(county_cases_deaths_by_day$STATE))
+    })
+    # This allows for the dropdown to select the second of two counties to compare, 
+    # where the UI only displays counties in the chosen state.
+    output$Chosen_County_Output_2 <- renderUI({
+          chosen_state_2 <- input$Chosen_State_Input_2
+          choice_var4 <- reactive({
+            unique(county_cases_deaths_by_day %>%
+                    filter(STATE %in% c(input$Chosen_State_Input_2)) %>%
+                    select(COUNTY))
+          })
+    selectizeInput(inputId = 'Chosen_County_Input_2', 'Select a County in that State',
+                   choices = choice_var4())
+    })
+    
+    # This allows the user to select a variable to compare.
+    output$Chosen_Comparison_Variable_Output <- renderUI({
+        choice_var5 <- reactive({
+          c("Cases per 100,000", "Deaths per 100,000", "Case Fatality Rate", 
+            "Percent Change in Cases from Preceding Day", 
+            "Percent Change in Deaths from Preceding Day", 
+            "Percent Change in Cases from 7 Days Ago", 
+            "Percent Change in Deaths from 7 Days Ago", 
+            "Doubling Rate of Cases, Based on Daily Growth Rates", 
+            "Doubling Rate of Deaths, Based on Daily Growth Rates", 
+            "Doubling Rate of Cases, Based on Weekly Growth Rates", 
+            "Doubling Rate of Deaths, Based on Weekly Growth Rates")
+        })
+        selectizeInput(inputId = 'Chosen_Comparison_Variable_Input', 'Select a Variable to Compare these Two Counties',
+                   choices = choice_var5())
+    })
+    
+    # This filters the data to only include the 2 chosen counties for comparison
+    chosen_comparison_data_1 <- reactive({
+      county_cases_deaths_by_day %>% filter(COUNTY %in% c(input$Chosen_County_Input_1) &
+                                            STATE %in% c(input$Chosen_State_Input_1))
+    })
+    chosen_comparison_data_2 <- reactive({
+      county_cases_deaths_by_day %>% filter(COUNTY %in% c(input$Chosen_County_Input_2) &
+                                            STATE %in% c(input$Chosen_State_Input_2))
+    })
+    
+    # This creates reactive variables corresponding to the county names, used for labeling
+    # in the comparison plots
+    county_1_label <- reactive({
+      paste0(input$Chosen_County_Input_1, ", ", input$Chosen_State_Input_1)
+    })
+    county_2_label <- reactive({
+      paste0(input$Chosen_County_Input_2, ", ", input$Chosen_State_Input_2)
+    })
+    
+    # Make a plot of the chosen variable to include in comparisons of two counties
+    output$comparison_plot <- renderPlot({
+      # Cases per 100,000 residents
+      if (input$Chosen_Comparison_Variable_Input == 'Cases per 100,000'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_PER_100000, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_PER_100000, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_PER_100000, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_PER_100000, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Cases per 100,000 Residents", 
+                       title = "Cases per 100,000 Residents by County",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Deaths per 100,000 residents
+      else if (input$Chosen_Comparison_Variable_Input == 'Deaths per 100,000'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_PER_100000, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_PER_100000, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_PER_100000, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_PER_100000, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Deaths per 100,000 Residents", 
+                       title = "Deaths per 100,000 Residents by County",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Case fatality rate 
+      else if (input$Chosen_Comparison_Variable_Input == 'Case Fatality Rate'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASE_FATALITY_RATE, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASE_FATALITY_RATE, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASE_FATALITY_RATE, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASE_FATALITY_RATE, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Deaths as a Percent of Confirmed Cases", 
+                       title = "Case Fatality Rate by County",
+                       color = "County") + theme_bw()
+      }
+      # Percent change in cases from preceding day
+      else if (input$Chosen_Comparison_Variable_Input == 
+               'Percent Change in Cases from Preceding Day'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_DAY_OVER_DAY_PCT_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_DAY_OVER_DAY_PCT_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_DAY_OVER_DAY_PCT_CHANGE, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_DAY_OVER_DAY_PCT_CHANGE, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Daily Percent Change in Cases", 
+                       title = "Percent Change in Cases from Preceding Day, by County",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Percent change in deaths from preceding day
+      else if (input$Chosen_Comparison_Variable_Input == 
+               'Percent Change in Deaths from Preceding Day'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_DAY_OVER_DAY_PCT_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_DAY_OVER_DAY_PCT_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_DAY_OVER_DAY_PCT_CHANGE, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_DAY_OVER_DAY_PCT_CHANGE, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Daily Percent Change in Deaths", 
+                       title = "Percent Change in Deaths from Preceding Day, by County",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Percent change in cases from 7 days ago
+      else if (input$Chosen_Comparison_Variable_Input == 
+               'Percent Change in Cases from 7 Days Ago'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Weekly Percent Change in Cases", 
+                       title = "Percent Change in Cases from 7 Days Ago, by County",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Percent change in deaths from 7 days ago
+      else if (input$Chosen_Comparison_Variable_Input == 
+               'Percent Change in Deaths from 7 Days Ago'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Weekly Percent Change in Deaths", 
+                       title = "Percent Change in Deaths from 7 Days Ago, by County",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Doubling rate of cases, based on daily growth rates
+      else if (input$Chosen_Comparison_Variable_Input == 
+               'Doubling Rate of Cases, Based on Daily Growth Rates'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Doubling Time in Days", 
+                       title = "Doubling Time of Cases, by County",
+                       subtitle = "Based on Percent Change from Preceding Day",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Doubling rate of deaths, based on daily growth rates
+      else if (input$Chosen_Comparison_Variable_Input == 
+               'Doubling Rate of Deaths, Based on Daily Growth Rates'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Doubling Time in Days", 
+                       title = "Doubling Time of Deaths, by County",
+                       subtitle = "Based on Percent Change from Preceding Day",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Doubling rate of cases, based on weekly growth rates
+      else if (input$Chosen_Comparison_Variable_Input == 
+               'Doubling Rate of Cases, Based on Weekly Growth Rates'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Doubling Time in Days", 
+                       title = "Doubling Time of Cases, by County",
+                       subtitle = "Based on Percent Change from 7 Days Ago",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      # Doubling rate of deaths, based on weekly growth rates
+      else if (input$Chosen_Comparison_Variable_Input == 
+               'Doubling Rate of Deaths, Based on Weekly Growth Rates'){
+        ggplot() + geom_line(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_point(data = chosen_comparison_data_1(), 
+                             aes(x = DATE, y = DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                                 color = county_1_label())) +
+                  geom_line(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                                 color = county_2_label())) +
+                  geom_point(data = chosen_comparison_data_2(), 
+                             aes(x = DATE, y = DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE, 
+                                 color = county_2_label())) + 
+                  labs(x = "Date", y = "Doubling Time in Days", 
+                       title = "Doubling Time of Deaths, by County",
+                       subtitle = "Based on Percent Change from 7 Days Ago",
+                       color = "County") + theme_bw() + scale_y_log10() 
+      }
+      
+    })
+    
+    
+    # The interactive Leaflet map below maps an assortment of variables.
+    output$interactive_map <- renderLeaflet({
+        
+      # Map for total cases
+      if (input$selected_variable_for_maps == 'Total Cases'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Confirmed Cases by County, ', input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = ~pal(log(chosen_mapping_data()$CASES)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Number of Confirmed Cases: </strong>",
+                                     chosen_mapping_data()$CASES)
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$CASES), opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Number of Confirmed Cases",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for total deaths
+      else if (input$selected_variable_for_maps == 'Total Deaths'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Confirmed Deaths by County, ', input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = ~pal(log(chosen_mapping_data()$DEATHS)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Number of Confirmed Deaths: </strong>",
+                                     chosen_mapping_data()$DEATHS)
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$DEATHS), opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Number of Confirmed Deaths",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for cases per 100,000 residents
+      else if (input$selected_variable_for_maps == 'Cases per 100,000'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Confirmed Cases per 100,000 Residents by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = ~pal(log(chosen_mapping_data()$CASES_PER_100000)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Confirmed Cases per 100,000: </strong>",
+                                     round(chosen_mapping_data()$CASES_PER_100000, 2))
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$CASES_PER_100000),
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Confirmed Cases per 100,000",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for deaths per 100,000 residents
+      else if (input$selected_variable_for_maps == 'Deaths per 100,000'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Confirmed Deaths per 100,000 Residents by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = ~pal(log(chosen_mapping_data()$DEATHS_PER_100000)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Confirmed Deaths per 100,000: </strong>",
+                                     round(chosen_mapping_data()$DEATHS_PER_100000, 2))
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$DEATHS_PER_100000),
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Confirmed Deaths per 100,000",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for case fatality rate
+      else if (input$selected_variable_for_maps == 'Case Fatality Rate'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Case Fatality Rate by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal_case_fatality_rate(chosen_mapping_data()$CASE_FATALITY_RATE),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Case Fatality Rate (%): </strong>",
+                                     round(chosen_mapping_data()$CASE_FATALITY_RATE, 2))
+                      ) %>%
+            addLegend(pal=pal_case_fatality_rate,
+                      values=~(chosen_mapping_data()$CASE_FATALITY_RATE), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "No Cases",
+                      title = "Case Fatality Rate (%)") 
+      }
+      # Map for daily new cases
+      else if (input$selected_variable_for_maps == 'Daily New Cases'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Daily New Cases by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = ~pal(log(chosen_mapping_data()$NUMBER_NEW_CASES_IN_DAY)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Number New Cases in Day: </strong>",
+                                     chosen_mapping_data()$NUMBER_NEW_CASES_IN_DAY)
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$NUMBER_NEW_CASES_IN_DAY), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Daily New Cases",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for daily new deaths
+      else if (input$selected_variable_for_maps == 'Daily New Deaths'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Daily New Deaths by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = ~pal(log(chosen_mapping_data()$NUMBER_NEW_DEATHS_IN_DAY)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Number New Deaths in Day: </strong>",
+                                     chosen_mapping_data()$NUMBER_NEW_DEATHS_IN_DAY)
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$NUMBER_NEW_DEATHS_IN_DAY), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Daily New Deaths",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for new cases in preceding 7 days
+      else if (input$selected_variable_for_maps == 'New Cases in Preceding 7 Days'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('New Cases in Preceding 7 Days by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal(log(chosen_mapping_data()$CASES_NUMBER_CHANGE_FROM_7_DAYS_AGO)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Number of New Cases in Preceding 7 Days: </strong>",
+                                     chosen_mapping_data()$CASES_NUMBER_CHANGE_FROM_7_DAYS_AGO)
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$CASES_NUMBER_CHANGE_FROM_7_DAYS_AGO), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "New Cases in Preceding 7 Days",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for new deaths in preceding 7 days
+      else if (input$selected_variable_for_maps == 'New Deaths in Preceding 7 Days'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('New Deaths in Preceding 7 Days by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal(log(chosen_mapping_data()$DEATHS_NUMBER_CHANGE_FROM_7_DAYS_AGO)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Number of New Deaths in Preceding 7 Days: </strong>",
+                                     chosen_mapping_data()$DEATHS_NUMBER_CHANGE_FROM_7_DAYS_AGO)
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$DEATHS_NUMBER_CHANGE_FROM_7_DAYS_AGO), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "New Deaths in Preceding 7 Days",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for daily percent change in cases 
+      else if (input$selected_variable_for_maps == 'Percent Change in Cases from Preceding Day'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Daily Percent Change in Cases by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal(log(chosen_mapping_data()$CASES_DAY_OVER_DAY_PCT_CHANGE)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Percent Change in Cases from Previous Day: </strong>",
+                                     round(chosen_mapping_data()$CASES_DAY_OVER_DAY_PCT_CHANGE, 2))
+                      ) %>%
+            addLegend(pal=pal, 
+                      values=~log(chosen_mapping_data()$CASES_DAY_OVER_DAY_PCT_CHANGE), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Daily Percent Change in Cases",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for daily percent change in deaths 
+      else if (input$selected_variable_for_maps == 'Percent Change in Deaths from Preceding Day'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Daily Percent Change in Deaths by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal(log(chosen_mapping_data()$DEATHS_DAY_OVER_DAY_PCT_CHANGE)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Percent Change in Deaths from Previous Day: </strong>",
+                                     round(chosen_mapping_data()$DEATHS_DAY_OVER_DAY_PCT_CHANGE, 2))
+                      ) %>%
+            addLegend(pal=pal, values=~log(chosen_mapping_data()$DEATHS_DAY_OVER_DAY_PCT_CHANGE), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Daily Percent Change in Deaths",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for percent change in cases from 7 days ago
+      else if (input$selected_variable_for_maps == 'Percent Change in Cases from 7 Days Ago'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Percent Change in Cases from 7 Days Ago, by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal(log(chosen_mapping_data()$CASES_PCT_CHANGE_FROM_7_DAYS_AGO)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Percent Change in Cases from 7 Days Ago: </strong>",
+                                     round(chosen_mapping_data()$CASES_PCT_CHANGE_FROM_7_DAYS_AGO, 2))
+                      ) %>%
+            addLegend(pal=pal, 
+                      values=~log(chosen_mapping_data()$CASES_PCT_CHANGE_FROM_7_DAYS_AGO), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Percent Change in Cases from 7 Days Ago",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for percent change in deaths from 7 days ago
+      else if (input$selected_variable_for_maps == 'Percent Change in Deaths from 7 Days Ago'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Percent Change in Deaths from 7 Days Ago, by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal(log(chosen_mapping_data()$DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Percent Change in Deaths from 7 Days Ago: </strong>",
+                                     round(chosen_mapping_data()$DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO, 2))
+                      ) %>%
+            addLegend(pal=pal, 
+                      values=~log(chosen_mapping_data()$DEATHS_PCT_CHANGE_FROM_7_DAYS_AGO), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "0",
+                      title = "Percent Change in Deaths from 7 Days Ago",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for doubling rate of cases, based on daily percent changes 
+      else if (input$selected_variable_for_maps == 'Doubling Rate of Cases, Based on Change from Preceding Day'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Doubling Rate of Cases (in days), by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal_doubling(log(chosen_mapping_data()$CASES_DOUBLING_TIME_ONE_DAY_CHANGE)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Doubling Time of Cases (Days): </strong>",
+                                     round(chosen_mapping_data()$CASES_DOUBLING_TIME_ONE_DAY_CHANGE, 2))
+                      ) %>%
+            addLegend(pal=pal_doubling, values=~log(chosen_mapping_data()$CASES_DOUBLING_TIME_ONE_DAY_CHANGE), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "NA",
+                      title = "Doubling Time of Cases, in Days",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for doubling rate of deaths, based on daily percent changes 
+      else if (input$selected_variable_for_maps == 'Doubling Rate of Deaths, Based on Change from Preceding Day'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Doubling Rate of Deaths Based on Change from Preceding Day (in days), by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal_doubling(log(chosen_mapping_data()$DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Doubling Time of Deaths (Days): </strong>",
+                                     round(chosen_mapping_data()$DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE, 2))
+                      ) %>%
+            addLegend(pal=pal_doubling, values=~log(chosen_mapping_data()$DEATHS_DOUBLING_TIME_ONE_DAY_CHANGE), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "NA",
+                      title = "Doubling Time of Deaths, in Days",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for doubling rate of cases, based on weekly percent changes 
+      else if (input$selected_variable_for_maps == 'Doubling Rate of Cases, Based on Change from 7 Days Ago'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Doubling Rate of Cases Based on Change from 7 Days Ago (in days), by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal_doubling(log(chosen_mapping_data()$CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Doubling Time of Cases (Days): </strong>",
+                                     round(chosen_mapping_data()$CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE, 2))
+                      ) %>%
+            addLegend(pal=pal_doubling, values=~log(chosen_mapping_data()$CASES_DOUBLING_TIME_SEVEN_DAY_CHANGE), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "NA",
+                      title = "Doubling Time of Cases, in Days",
+                      labFormat = labelFormat(transform = function(x) exp(x))) 
+      }
+      # Map for doubling rate of deaths, based on weekly percent changes 
+      else if (input$selected_variable_for_maps == 'Doubling Rate of Deaths, Based on Change from 7 Days Ago'){
+          # Subset the data to only include the selected date
+          leaflet(data = chosen_mapping_data()) %>%
+          # Base groups
+          addTiles() %>%
+          addControl(paste0('Doubling Rate of Deaths Based on Change from 7 Days Ago (in days), by County, ', 
+                            input$selected_date_for_maps), 
+                     position = "topright") %>%
+          setView(lng = -105, lat = 40, zoom = 4) %>%
+          addPolygons(fillColor = 
+                        ~pal_doubling(log(chosen_mapping_data()$DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE+0.001)),
+                      fillOpacity = 0.8, 
+                      color = "#BDBDC3",
+                      weight = 1,
+                      group = 'Counties',
+                      popup = paste0("<strong>County: </strong>",
+                                     chosen_mapping_data()$COUNTY,
+                                     "<br><strong>State: </strong>",
+                                     chosen_mapping_data()$STATE,
+                                     "<br><strong>Doubling Time of Deaths (Days): </strong>",
+                                     round(chosen_mapping_data()$DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE, 2))
+                      ) %>%
+            addLegend(pal=pal_doubling, values=~log(chosen_mapping_data()$DEATHS_DOUBLING_TIME_SEVEN_DAY_CHANGE + 0.001), 
+                      opacity=0.9,
+                      group = 'Counties',
+                      na.label = "NA",
+                      title = "Doubling Time of Deaths, in Days",
+                      labFormat = labelFormat(transform = function(x) exp(x)-0.001)) 
+      }
+    })
+}
+
+# Run the shinyApp
+shinyApp(ui = ui, server = server)
+```
